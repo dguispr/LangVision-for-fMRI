@@ -46,10 +46,3 @@ class CustomNet(nn.Module):
         out = sub_out + mul_out
         
         return out
-
-
-model = CustomNet()
-x = torch.randn(1, 3, 227, 227)
-output = model(x)
-
-print(output.shape)
