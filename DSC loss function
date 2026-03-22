@@ -1,0 +1,114 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DSCLoss(nn.Module):
+    def __init__(self, lambda_E=0.1, lambda_eig=0.01, temperature=0.07):
+        """
+        DSC Loss = L_clip + lambda_E * L_E + lambda_eig * L_eig
+        
+        Args:
+            lambda_E: weight for energy-based loss
+            lambda_eig: weight for eigenvalue-based regularizer
+            temperature: scaling factor for contrastive similarity
+        """
+        super(DSCLoss, self).__init__()
+        self.lambda_E = lambda_E
+        self.lambda_eig = lambda_eig
+        self.temperature = temperature
+
+    # -------------------------------------------------
+    # 1. CLIP-style symmetric contrastive loss
+    # -------------------------------------------------
+    def clip_loss(self, v_emb, t_emb):
+        """
+        v_emb: [B, D] -> fMRI embeddings
+        t_emb: [B, D] -> text embeddings
+        """
+        # Normalize embeddings
+        v_emb = F.normalize(v_emb, dim=1)
+        t_emb = F.normalize(t_emb, dim=1)
+
+        # Similarity matrix (B x B)
+        logits = torch.matmul(v_emb, t_emb.T) / self.temperature
+
+        # Ground-truth labels (diagonal match)
+        B = v_emb.size(0)
+        labels = torch.arange(B).to(v_emb.device)
+
+        # fMRI -> text
+        loss_v2t = F.cross_entropy(logits, labels)
+
+        # text -> fMRI
+        loss_t2v = F.cross_entropy(logits.T, labels)
+
+        # Symmetric loss
+        L_clip = 0.5 * (loss_v2t + loss_t2v)
+
+        return L_clip
+
+    # -------------------------------------------------
+    # 2. Energy-weighted loss (L_E)
+    # -------------------------------------------------
+    def energy_loss(self, Y_pred, Y_true, X):
+        """
+        Y_pred: predicted output [B, C, H, W]
+        Y_true: ground truth [B, C, H, W]
+        X: input feature map [B, C, H, W]
+        """
+        # Energy map E = X^2
+        E = X ** 2
+
+        # Normalize energy (alpha)
+        alpha = E / (E.max() + 1e-8)
+
+        # Pixel-wise cross-entropy (or MSE if regression)
+        loss_map = F.mse_loss(Y_pred, Y_true, reduction='none')
+
+        # Weighted loss
+        L_E = torch.mean(alpha * loss_map)
+
+        return L_E
+
+    # -------------------------------------------------
+    # 3. Eigenvalue-based regularization (L_eig)
+    # -------------------------------------------------
+    def eigen_loss(self, X, kernel_size=3):
+        """
+        X: feature map [B, C, H, W]
+        Extract high-energy patches and compute variance after convolution
+        """
+        B, C, H, W = X.shape
+
+        # Simple convolution kernel (learnable or fixed)
+        conv = nn.Conv2d(C, C, kernel_size=kernel_size, padding=1, bias=False).to(X.device)
+
+        # Convolve features
+        X_conv = conv(X)
+
+        # Compute variance over spatial dimensions
+        var = torch.var(X_conv, dim=[2, 3])  # variance per channel
+
+        # Sum over batch and channels
+        L_eig = torch.mean(var)
+
+        return L_eig
+
+    # -------------------------------------------------
+    # 4. Final DSC Loss
+    # -------------------------------------------------
+    def forward(self, v_emb, t_emb, Y_pred, Y_true, X):
+        """
+        Combines all loss terms
+        """
+        L_clip = self.clip_loss(v_emb, t_emb)
+        L_E = self.energy_loss(Y_pred, Y_true, X)
+        L_eig = self.eigen_loss(X)
+
+        L_total = L_clip + self.lambda_E * L_E + self.lambda_eig * L_eig
+
+        return L_total, {
+            "L_clip": L_clip.item(),
+            "L_E": L_E.item(),
+            "L_eig": L_eig.item()
+        }
