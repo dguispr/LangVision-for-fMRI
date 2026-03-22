@@ -1,0 +1,55 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class CustomNet(nn.Module):
+    def __init__(self):
+        super(CustomNet, self).__init__()
+        
+        # Convolution layers
+        self.conv = nn.Conv2d(3, 32, kernel_size=3, padding=1)
+        self.conv1 = nn.Conv2d(3, 32, kernel_size=3, padding=1)
+        
+        # Pooling layers
+        self.avgpool = nn.AvgPool2d(kernel_size=3, stride=1, padding=1)
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=1, padding=1)
+        
+        # Global Average Pooling
+        self.gap = nn.AdaptiveAvgPool2d((1, 1))
+
+    def forward(self, x):
+        # Parallel convs
+        x1 = self.conv(x)
+        x2 = self.conv1(x)
+        
+        # element-wise correlation approximation
+        corr = torch.sum(x1 * x2, dim=1, keepdim=True)
+        
+        # Expand back to match channels
+        corr = corr.repeat(1, x1.shape[1], 1, 1)
+        
+        # Pooling branches
+        avg_out = self.avgpool(corr)
+        max_out = self.maxpool(corr)
+        
+        # ➖ Subtraction
+        sub_out = max_out - avg_out
+        
+        # Global pooling branch
+        gap_out = self.gap(max_out)
+        
+        # Second multiplication
+        gap_out = F.interpolate(gap_out, size=sub_out.shape[2:])
+        mul_out = sub_out * gap_out
+        
+        # Final addition
+        out = sub_out + mul_out
+        
+        return out
+
+
+model = CustomNet()
+x = torch.randn(1, 3, 227, 227)
+output = model(x)
+
+print(output.shape)
