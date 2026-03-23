@@ -1,41 +1,68 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+lgraph = layerGraph();
 
-class CustomNet(nn.Module):
-    def __init__(self):
-        super(CustomNet, self).__init__()
-        
-        # Initial convolutions
-        self.conv = nn.Conv2d(3, 32, kernel_size=3, padding=1)
-        self.conv1 = nn.Conv2d(3, 32, kernel_size=3, padding=1)
-        
-        # Pooling layers
-        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=1, padding=1)
-        self.maxpool1 = nn.MaxPool2d(kernel_size=3, stride=1, padding=1)
-        
-        # Second convolution branches
-        self.conv2 = nn.Conv2d(32, 32, kernel_size=3, padding=1)
-        self.conv3 = nn.Conv2d(32, 32, kernel_size=3, padding=1)
+%% Input
+tempNet = imageInputLayer([227 227 3],"Name","input");
+lgraph = addLayers(lgraph,tempNet);
 
-    def forward(self, x):
-        # Parallel conv layers
-        x1 = self.conv(x)
-        x2 = self.conv1(x)
-        
-        # channel-wise correlation
-        corr = torch.sum(x1 * x2, dim=1, keepdim=True)
-        corr = corr.repeat(1, x1.shape[1], 1, 1)
-        
-        # Branch 1: pooling path
-        pool1 = self.maxpool(corr)
-        pool2 = self.maxpool1(pool1)
-        
-        # Branch 2: convolution path
-        conv_path = self.conv2(corr)
-        conv_path = self.conv3(conv_path)
-        
-        # Subtraction
-        out = pool2 - conv_path
-        
-        return out
+%% Parallel Convolutions
+tempNet = convolution2dLayer(3,32,"Padding","same","Name","conv");
+lgraph = addLayers(lgraph,tempNet);
+
+tempNet = convolution2dLayer(3,32,"Padding","same","Name","conv1");
+lgraph = addLayers(lgraph,tempNet);
+
+%% Multiplication (x1 * x2)
+tempNet = multiplicationLayer(2,"Name","mult");
+lgraph = addLayers(lgraph,tempNet);
+
+%% Channel-wise sum (correlation)
+tempNet = functionLayer(@(X) sum(X,3),"Name","channel_sum","Formattable",true);
+lgraph = addLayers(lgraph,tempNet);
+
+%% Repeat channels to 32
+tempNet = functionLayer(@(X) repmat(X,1,1,32),"Name","repeat","Formattable",true);
+lgraph = addLayers(lgraph,tempNet);
+
+%% Pooling branch
+tempNet = maxPooling2dLayer(3,"Stride",1,"Padding","same","Name","maxpool");
+lgraph = addLayers(lgraph,tempNet);
+
+tempNet = maxPooling2dLayer(3,"Stride",1,"Padding","same","Name","maxpool1");
+lgraph = addLayers(lgraph,tempNet);
+
+%% Convolution branch
+tempNet = convolution2dLayer(3,32,"Padding","same","Name","conv2");
+lgraph = addLayers(lgraph,tempNet);
+
+tempNet = convolution2dLayer(3,32,"Padding","same","Name","conv3");
+lgraph = addLayers(lgraph,tempNet);
+
+%% Subtraction layer
+tempNet = subtractionLayer(2,"Name","sub");
+lgraph = addLayers(lgraph,tempNet);
+
+%% Connections
+
+lgraph = connectLayers(lgraph,"input","conv");
+lgraph = connectLayers(lgraph,"input","conv1");
+
+lgraph = connectLayers(lgraph,"conv","mult/in1");
+lgraph = connectLayers(lgraph,"conv1","mult/in2");
+
+lgraph = connectLayers(lgraph,"mult","channel_sum");
+lgraph = connectLayers(lgraph,"channel_sum","repeat");
+
+% Pooling branch
+lgraph = connectLayers(lgraph,"repeat","maxpool");
+lgraph = connectLayers(lgraph,"maxpool","maxpool1");
+
+% Conv branch
+lgraph = connectLayers(lgraph,"repeat","conv2");
+lgraph = connectLayers(lgraph,"conv2","conv3");
+
+% Subtraction
+lgraph = connectLayers(lgraph,"maxpool1","sub/in1");
+lgraph = connectLayers(lgraph,"conv3","sub/in2");
+
+%% Initialize network
+net = dlnetwork(lgraph);
