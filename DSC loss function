@@ -1,114 +1,113 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-class DSCLoss(nn.Module):
-    def __init__(self, lambda_E=0.1, lambda_eig=0.01, temperature=0.07):
-        """
-        DSC Loss = L_clip + lambda_E * L_E + lambda_eig * L_eig
+classdef DSCLoss
+    properties
+        lambda_E = 0.1;
+        lambda_eig = 0.01;
+        temperature = 0.07;
+    end
+    
+    methods
+        % Constructor
+        function obj = DSCLoss(lambda_E, lambda_eig, temperature)
+            if nargin > 0
+                obj.lambda_E = lambda_E;
+                obj.lambda_eig = lambda_eig;
+                obj.temperature = temperature;
+            end
+        end
         
-        Args:
-            lambda_E: weight for energy-based loss
-            lambda_eig: weight for eigenvalue-based regularizer
-            temperature: scaling factor for contrastive similarity
-        """
-        super(DSCLoss, self).__init__()
-        self.lambda_E = lambda_E
-        self.lambda_eig = lambda_eig
-        self.temperature = temperature
+        % -------------------------------------------------
+        % 1. CLIP-style symmetric contrastive loss
+        % -------------------------------------------------
+        function L_clip = clip_loss(obj, v_emb, t_emb)
+            % Normalize embeddings
+            v_emb = obj.normalize(v_emb);
+            t_emb = obj.normalize(t_emb);
 
-    # -------------------------------------------------
-    # 1. CLIP-style symmetric contrastive loss
-    # -------------------------------------------------
-    def clip_loss(self, v_emb, t_emb):
-        """
-        v_emb: [B, D] -> fMRI embeddings
-        t_emb: [B, D] -> text embeddings
-        """
-        # Normalize embeddings
-        v_emb = F.normalize(v_emb, dim=1)
-        t_emb = F.normalize(t_emb, dim=1)
+            % Similarity matrix
+            logits = (v_emb * t_emb') / obj.temperature;
 
-        # Similarity matrix (B x B)
-        logits = torch.matmul(v_emb, t_emb.T) / self.temperature
+            B = size(v_emb,1);
+            labels = 1:B;
 
-        # Ground-truth labels (diagonal match)
-        B = v_emb.size(0)
-        labels = torch.arange(B).to(v_emb.device)
+            % Cross entropy (manual)
+            loss_v2t = obj.cross_entropy(logits, labels);
+            loss_t2v = obj.cross_entropy(logits', labels);
 
-        # fMRI -> text
-        loss_v2t = F.cross_entropy(logits, labels)
+            L_clip = 0.5 * (loss_v2t + loss_t2v);
+        end
+        
+        % -------------------------------------------------
+        % 2. Energy-weighted loss
+        % -------------------------------------------------
+        function L_E = energy_loss(~, Y_pred, Y_true, X)
+            % Energy
+            E = X.^2;
 
-        # text -> fMRI
-        loss_t2v = F.cross_entropy(logits.T, labels)
+            % Normalize
+            alpha = E ./ (max(E,[],'all') + 1e-8);
 
-        # Symmetric loss
-        L_clip = 0.5 * (loss_v2t + loss_t2v)
+            % MSE loss map
+            loss_map = (Y_pred - Y_true).^2;
 
-        return L_clip
+            % Weighted mean
+            L_E = mean(alpha .* loss_map,'all');
+        end
+        
+        % -------------------------------------------------
+        % 3. Eigenvalue-based loss
+        % -------------------------------------------------
+        function L_eig = eigen_loss(~, X)
+            % Simple convolution kernel
+            C = size(X,3);
+            kernel = randn(3,3,C,C,'like',X) * 0.01;
 
-    # -------------------------------------------------
-    # 2. Energy-weighted loss (L_E)
-    # -------------------------------------------------
-    def energy_loss(self, Y_pred, Y_true, X):
-        """
-        Y_pred: predicted output [B, C, H, W]
-        Y_true: ground truth [B, C, H, W]
-        X: input feature map [B, C, H, W]
-        """
-        # Energy map E = X^2
-        E = X ** 2
+            % Convolution
+            X_conv = dlconv(X, kernel, [], 'Padding','same');
 
-        # Normalize energy (alpha)
-        alpha = E / (E.max() + 1e-8)
+            % Variance over spatial dims
+            var_map = var(X_conv,0,[1 2]);
 
-        # Pixel-wise cross-entropy (or MSE if regression)
-        loss_map = F.mse_loss(Y_pred, Y_true, reduction='none')
+            % Mean over channels and batch
+            L_eig = mean(var_map,'all');
+        end
+        
+        % -------------------------------------------------
+        % 4. Final DSC Loss
+        % -------------------------------------------------
+        function [L_total, loss_dict] = forward(obj, v_emb, t_emb, Y_pred, Y_true, X)
+            
+            L_clip = obj.clip_loss(v_emb, t_emb);
+            L_E = obj.energy_loss(Y_pred, Y_true, X);
+            L_eig = obj.eigen_loss(X);
 
-        # Weighted loss
-        L_E = torch.mean(alpha * loss_map)
+            L_total = L_clip + obj.lambda_E * L_E + obj.lambda_eig * L_eig;
 
-        return L_E
+            loss_dict.L_clip = extractdata(L_clip);
+            loss_dict.L_E = extractdata(L_E);
+            loss_dict.L_eig = extractdata(L_eig);
+        end
+        
+        % -------------------------------------------------
+        % Helper: Normalize
+        % -------------------------------------------------
+        function Xn = normalize(~, X)
+            Xn = X ./ sqrt(sum(X.^2,2) + 1e-8);
+        end
+        
+        % -------------------------------------------------
+        % Helper: Cross Entropy
+        % -------------------------------------------------
+        function loss = cross_entropy(~, logits, labels)
+            % Softmax
+            exp_logits = exp(logits);
+            probs = exp_logits ./ sum(exp_logits,2);
 
-    # -------------------------------------------------
-    # 3. Eigenvalue-based regularization (L_eig)
-    # -------------------------------------------------
-    def eigen_loss(self, X, kernel_size=3):
-        """
-        X: feature map [B, C, H, W]
-        Extract high-energy patches and compute variance after convolution
-        """
-        B, C, H, W = X.shape
+            % Gather correct class probabilities
+            idx = sub2ind(size(probs), (1:size(probs,1))', labels');
+            p = probs(idx);
 
-        # Simple convolution kernel (learnable or fixed)
-        conv = nn.Conv2d(C, C, kernel_size=kernel_size, padding=1, bias=False).to(X.device)
-
-        # Convolve features
-        X_conv = conv(X)
-
-        # Compute variance over spatial dimensions
-        var = torch.var(X_conv, dim=[2, 3])  # variance per channel
-
-        # Sum over batch and channels
-        L_eig = torch.mean(var)
-
-        return L_eig
-
-    # -------------------------------------------------
-    # 4. Final DSC Loss
-    # -------------------------------------------------
-    def forward(self, v_emb, t_emb, Y_pred, Y_true, X):
-        """
-        Combines all loss terms
-        """
-        L_clip = self.clip_loss(v_emb, t_emb)
-        L_E = self.energy_loss(Y_pred, Y_true, X)
-        L_eig = self.eigen_loss(X)
-
-        L_total = L_clip + self.lambda_E * L_E + self.lambda_eig * L_eig
-
-        return L_total, {
-            "L_clip": L_clip.item(),
-            "L_E": L_E.item(),
-            "L_eig": L_eig.item()
-        }
+            % Loss
+            loss = -mean(log(p + 1e-8));
+        end
+    end
+end
