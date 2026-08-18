@@ -1,9 +1,5 @@
 lgraph = layerGraph();
 
-% Input layer
-tempNet = imageInputLayer([227 227 3],"Name","input");
-lgraph = addLayers(lgraph,tempNet);
-
 % Parallel convolution layers
 tempNet = [
     convolution2dLayer(3,32,"Padding","same","Name","conv")
