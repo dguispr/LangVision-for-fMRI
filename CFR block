@@ -1,9 +1,5 @@
 lgraph = layerGraph();
 
-%% Input
-tempNet = imageInputLayer([227 227 3],"Name","input");
-lgraph = addLayers(lgraph,tempNet);
-
 %% Parallel Convolutions
 tempNet = convolution2dLayer(3,32,"Padding","same","Name","conv");
 lgraph = addLayers(lgraph,tempNet);
@@ -31,10 +27,10 @@ tempNet = maxPooling2dLayer(3,"Stride",1,"Padding","same","Name","maxpool1");
 lgraph = addLayers(lgraph,tempNet);
 
 %% Convolution branch
-tempNet = convolution2dLayer(3,32,"Padding","same","Name","conv2");
+tempNet = convolution2dLayer(3,32, "Padding","same","Name","conv3");
 lgraph = addLayers(lgraph,tempNet);
 
-tempNet = convolution2dLayer(3,32,"Padding","same","Name","conv3");
+tempNet = convolution2dLayer(3,32, "Padding","same","Name","conv4");
 lgraph = addLayers(lgraph,tempNet);
 
 %% Subtraction layer
